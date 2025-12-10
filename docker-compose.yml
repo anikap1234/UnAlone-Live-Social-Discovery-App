@@ -1,0 +1,53 @@
+version: '3.8'
+services:
+  mongo:
+    image: mongo:6.0
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
+
+  redis:
+    image: redis:7.0-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      - PORT=8080
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=unalone
+      - REDIS_URL=redis:6379
+      - JWT_SECRET=changeme
+      - OTP_MODE=log
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mongo
+      - redis
+    networks:
+      - unalone-net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: http://localhost:8080
+        VITE_MAPBOX_TOKEN: pk.your_mapbox_token
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - unalone-net
+
+volumes:
+  mongo-data:
+
+networks:
+  unalone-net:
+    driver: bridge
