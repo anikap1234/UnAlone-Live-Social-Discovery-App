@@ -1,1 +1,1 @@
-declare module 'mapbox-gl'
+/// <reference types="vite/client" />

@@ -1,60 +1,57 @@
 package main
 
 import (
-    "context"
-    "log"
-    "os"
-    "os/signal"
-    "syscall"
-    "time"
-
-    "github.com/gofiber/fiber/v2"
-    "github.com/gofiber/fiber/v2/middleware/logger"
-
-    "unalone/backend/api"
-    "unalone/backend/config"
-    dbpkg "unalone/backend/db"
-    "unalone/backend/redis"
-    "unalone/backend/ws"
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+	"unalone/backend/api"
+	"unalone/backend/config"
+	"unalone/backend/db"
+	"unalone/backend/redis"
+	"unalone/backend/services"
+	"unalone/backend/ws"
 )
 
 func main() {
-    cfg := config.Load()
-
-    // Initialize services
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-
-    if err := dbpkg.Init(ctx, cfg); err != nil {
-        log.Fatalf("mongodb init: %v", err)
-    }
-
-    if err := redis.Init(cfg); err != nil {
-        log.Fatalf("redis init: %v", err)
-    }
-
-    hub := ws.NewHub()
-    go hub.Run()
-
-    app := fiber.New()
-    app.Use(logger.New())
-
-    api.RegisterRoutes(app, cfg, hub)
-
-    // Graceful shutdown
-    go func() {
-        if err := app.Listen(cfg.Server.Address); err != nil {
-            log.Printf("server error: %v", err)
-        }
-    }()
-
-    quit := make(chan os.Signal, 1)
-    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-    <-quit
-
-    log.Println("shutting down")
-    ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancelShutdown()
-    _ = app.Shutdown()
-    dbpkg.Disconnect(ctxShutdown)
+	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Configuration: %v", err)
+	}
+	if cfg.Env == "production" {
+		log.Fatal("This milestone is local-only; configure production delivery and deployment before enabling production mode")
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	startup, stop := context.WithTimeout(ctx, 20*time.Second)
+	defer stop()
+	if err := db.Init(startup, cfg); err != nil {
+		log.Fatalf("MongoDB initialization: %v", err)
+	}
+	if err := redis.Init(cfg); err != nil {
+		log.Fatalf("Redis initialization: %v", err)
+	}
+	hub := ws.NewHub()
+	hotspots := services.NewHotspotService(hub)
+	if err := hotspots.StartExpiryListener(ctx); err != nil {
+		log.Fatalf("Presence expiry listener: %v", err)
+	}
+	app := api.NewApp(cfg, hub, hotspots)
+	failures := make(chan error, 1)
+	go func() { failures <- app.Listen(cfg.Server.Address) }()
+	log.Printf("UnAlone local API listening on %s", cfg.Server.Address)
+	select {
+	case <-ctx.Done():
+	case err := <-failures:
+		log.Printf("HTTP server stopped: %v", err)
+	}
+	cancel()
+	hub.Close()
+	shutdown, done := context.WithTimeout(context.Background(), 10*time.Second)
+	defer done()
+	_ = app.ShutdownWithContext(shutdown)
+	_ = db.Disconnect(shutdown)
+	_ = redis.Client.Close()
 }

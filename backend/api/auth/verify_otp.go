@@ -1,38 +1,53 @@
 package auth
 
 import (
-    "context"
-    "strings"
-
-    "github.com/gofiber/fiber/v2"
-    cfgpkg "unalone/backend/config"
-    authsvc "unalone/backend/auth"
+	"context"
+	"errors"
+	"github.com/gofiber/fiber/v2"
+	"regexp"
+	"time"
+	authsvc "unalone/backend/auth"
+	"unalone/backend/config"
+	"unalone/backend/services"
+	"unalone/backend/utils"
 )
 
-type verifyReq struct {
-    Email string `json:"email"`
-    Code  string `json:"code"`
-}
+var codePattern = regexp.MustCompile("^[0-9]{6}$")
 
-func VerifyOTPHandler(cfg *cfgpkg.Config) fiber.Handler {
-    return func(c *fiber.Ctx) error {
-        var req verifyReq
-        if err := c.BodyParser(&req); err != nil {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
-        }
-        email := strings.TrimSpace(req.Email)
-        code := strings.TrimSpace(req.Code)
-        if email == "" || code == "" {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing"})
-        }
-        ok, err := authsvc.VerifyOTP(context.Background(), email, code)
-        if err != nil || !ok {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid code"})
-        }
-        token, err := authsvc.GenerateToken(cfg.JWTSecret, email)
-        if err != nil {
-            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "token"})
-        }
-        return c.JSON(fiber.Map{"token": token})
-    }
+func VerifyOTPHandler(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req struct {
+			Email string `json:"email"`
+			OTP   string `json:"otp"`
+		}
+		if c.BodyParser(&req) != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
+		}
+		email, valid := utils.NormalizeEmail(req.Email)
+		if !valid || !codePattern.MatchString(req.OTP) {
+			return c.Status(400).JSON(fiber.Map{"error": "Enter your email and six-digit code"})
+		}
+		ctx, cancel := context.WithTimeout(c.UserContext(), 10*time.Second)
+		defer cancel()
+		ok, err := authsvc.VerifyOTP(ctx, email, req.OTP)
+		if errors.Is(err, authsvc.ErrRateLimited) {
+			return c.Status(429).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err != nil {
+			return c.Status(503).JSON(fiber.Map{"error": "Sign-in is temporarily unavailable"})
+		}
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"error": "The code is incorrect or has expired"})
+		}
+		user, err := services.FindOrCreateUser(ctx, email)
+		if err != nil {
+			return c.Status(503).JSON(fiber.Map{"error": "Could not load your account. Request a new code and retry"})
+		}
+		token, err := authsvc.GenerateToken(cfg.JWTSecret, user.ID, user.Email)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Could not create your session"})
+		}
+		c.Cookie(&fiber.Cookie{Name: authsvc.CookieName, Value: token, HTTPOnly: true, Secure: cfg.Env == "production", SameSite: "Lax", Path: "/", MaxAge: 72 * 3600})
+		return c.JSON(fiber.Map{"token": token, "user": user})
+	}
 }

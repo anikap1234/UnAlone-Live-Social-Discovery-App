@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+backend/unalone
+backend/unalone.exe
+tmp/
+output/
+resume_*.pdf
+resume_*.tex
+build_resume_pdf.py
+photo.jpg
+resume_pdf_render/

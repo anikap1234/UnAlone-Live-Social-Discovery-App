@@ -1,28 +1,28 @@
 package auth
 
 import (
-    "strings"
-
-    "github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2"
+	"strings"
 )
 
-// JWTMiddleware extracts Bearer token and sets email in context locals
+const CookieName = "unalone_session"
+
 func JWTMiddleware(secret string) fiber.Handler {
-    return func(c *fiber.Ctx) error {
-        auth := c.Get("Authorization")
-        if auth == "" {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing auth"})
-        }
-        parts := strings.SplitN(auth, " ", 2)
-        if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid auth"})
-        }
-        token := parts[1]
-        claims, err := ParseToken(secret, token)
-        if err != nil {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
-        }
-        c.Locals("email", claims.Email)
-        return c.Next()
-    }
+	return func(c *fiber.Ctx) error {
+		value := c.Cookies(CookieName)
+		if header := c.Get("Authorization"); header != "" {
+			parts := strings.Fields(header)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				return c.Status(401).JSON(fiber.Map{"error": "Invalid authorization header"})
+			}
+			value = parts[1]
+		}
+		claims, err := ParseToken(secret, value)
+		if err != nil {
+			return c.Status(401).JSON(fiber.Map{"error": "Please sign in again"})
+		}
+		c.Locals("userId", claims.Subject)
+		c.Locals("email", claims.Email)
+		return c.Next()
+	}
 }

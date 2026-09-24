@@ -1,55 +1,50 @@
 package ws
 
-import (
-    "sync"
-)
+import "sync"
 
 type Hub struct {
-    clients map[*Client]bool
-    broadcast chan []byte
-    register chan *Client
-    unregister chan *Client
-    mu sync.Mutex
+	mu      sync.Mutex
+	clients map[*Client]bool
+	closed  bool
 }
 
-func NewHub() *Hub {
-    return &Hub{
-        clients: make(map[*Client]bool),
-        broadcast: make(chan []byte),
-        register: make(chan *Client),
-        unregister: make(chan *Client),
-    }
+func NewHub() *Hub { return &Hub{clients: make(map[*Client]bool)} }
+func (h *Hub) register(c *Client) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return false
+	}
+	h.clients[c] = true
+	return true
 }
-
-func (h *Hub) Run() {
-    for {
-        select {
-        case c := <-h.register:
-            h.mu.Lock()
-            h.clients[c] = true
-            h.mu.Unlock()
-        case c := <-h.unregister:
-            h.mu.Lock()
-            if _, ok := h.clients[c]; ok {
-                delete(h.clients, c)
-                close(c.send)
-            }
-            h.mu.Unlock()
-        case message := <-h.broadcast:
-            h.mu.Lock()
-            for client := range h.clients {
-                select {
-                case client.send <- message:
-                default:
-                    close(client.send)
-                    delete(h.clients, client)
-                }
-            }
-            h.mu.Unlock()
-        }
-    }
+func (h *Hub) unregister(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.clients[c] {
+		delete(h.clients, c)
+		close(c.send)
+	}
 }
-
-func (h *Hub) Broadcast(message []byte) {
-    h.broadcast <- message
+func (h *Hub) Broadcast(data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		select {
+		case c.send <- data:
+		default:
+			delete(h.clients, c)
+			close(c.send)
+		}
+	}
+}
+func (h *Hub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for c := range h.clients {
+		delete(h.clients, c)
+		close(c.send)
+		_ = c.conn.Close()
+	}
 }

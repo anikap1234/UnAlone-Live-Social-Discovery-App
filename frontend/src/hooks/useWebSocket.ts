@@ -1,31 +1,79 @@
-import { useEffect, useRef } from 'react'
-import useStore from '../store/useStore'
+import { useEffect } from 'react'
+import api, { API_BASE } from '../api/api'
+import useStore, { LiveEvent } from '../store/useStore'
 
-export default function useWebSocket() {
-  const wsRef = useRef<WebSocket | null>(null)
-  const addHotspot = useStore(state => state.addHotspot)
-  const addMeetup = useStore(state => state.addMeetup)
-
+export default function useWebSocket(enabled: boolean) {
   useEffect(() => {
-    const apiBase = (import.meta.env.VITE_API_BASE || 'http://localhost:8080').replace(/^http/, 'ws')
-    const ws = new WebSocket(`${apiBase.replace(/\/$/, '')}/ws`)
-    wsRef.current = ws
-    ws.onmessage = (ev) => {
-      try {
-        const parsed = JSON.parse(ev.data)
-        if (parsed.type === 'HOTSPOT_UPDATE') {
-          addHotspot({ lat: parsed.lat, lon: parsed.lon, activeUsers: parsed.activeUsers })
-        }
-        if (parsed.type === 'MEETUP_CREATED') {
-          const m = parsed.data
-          addMeetup({ id: m.id, title: m.title, description: m.description, lat: m.lat, lon: m.lon })
-        }
-      } catch (e) {
-        // ignore
+    if (!enabled) return
+    let stopped = false
+    let retries = 0
+    let timer: number | undefined
+    let socket: WebSocket | undefined
+    let controller: AbortController | undefined
+    const connect = () => {
+      if (stopped) return
+      if (!navigator.onLine) { useStore.getState().setConnection('offline'); return }
+      useStore.getState().setConnection('connecting')
+      const base = new URL(API_BASE.replace(/\/$/, '') + '/ws', window.location.origin)
+      base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(base)
+      socket = ws
+      let ready = false
+      const queued: LiveEvent[] = []
+      ws.onopen = async () => {
+        if (stopped) return
+        controller = new AbortController()
+        useStore.getState().resetLive()
+        try {
+          const response = await api.get('/hotspots', { signal: controller.signal })
+          if (stopped || socket !== ws || ws.readyState !== WebSocket.OPEN) return
+          useStore.getState().setHotspots(response.data.hotspots)
+          queued.forEach(event => useStore.getState().applyEvent(event))
+          ready = true
+          retries = 0
+          useStore.getState().setConnection('live')
+        } catch { ws.close() }
+      }
+      ws.onmessage = message => {
+        try {
+          const event: LiveEvent = JSON.parse(message.data)
+          if (!['HOTSPOT_FORMED', 'HOTSPOT_DISSOLVED', 'MEETUP_CREATED'].includes(event.type)) return
+          if (ready) useStore.getState().applyEvent(event)
+          else if (queued.length < 200) queued.push(event)
+          else ws.close()
+        } catch { /* An invalid frame cannot change application state. */ }
+      }
+      ws.onerror = () => ws.close()
+      ws.onclose = () => {
+        if (stopped || socket !== ws) return
+        controller?.abort()
+        useStore.getState().setConnection('offline')
+        useStore.getState().setHotspots([])
+        if (navigator.onLine) timer = window.setTimeout(connect, Math.min(1000 * 2 ** retries++, 15000))
       }
     }
-    return () => {
-      ws.close()
+    const offline = () => {
+      window.clearTimeout(timer)
+      controller?.abort()
+      socket?.close()
+      useStore.getState().setConnection('offline')
+      useStore.getState().setHotspots([])
     }
-  }, [addHotspot, addMeetup])
+    const online = () => {
+      window.clearTimeout(timer)
+      socket?.close()
+      connect()
+    }
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
+    connect()
+    return () => {
+      stopped = true
+      window.clearTimeout(timer)
+      controller?.abort()
+      socket?.close()
+      window.removeEventListener('offline', offline)
+      window.removeEventListener('online', online)
+    }
+  }, [enabled])
 }

@@ -3,8 +3,9 @@ WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum ./
 RUN go env -w GOPROXY=https://proxy.golang.org,direct
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /bin/unalone ./...
+RUN CGO_ENABLED=0 go build -o /bin/unalone .
 
 FROM alpine:3.18
 RUN apk add --no-cache ca-certificates

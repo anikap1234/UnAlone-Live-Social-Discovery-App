@@ -1,33 +1,33 @@
 package location
 
 import (
-    "context"
-
-    "github.com/gofiber/fiber/v2"
-    "unalone/backend/services"
-    "unalone/backend/ws"
+	"context"
+	"errors"
+	"github.com/gofiber/fiber/v2"
+	"time"
+	"unalone/backend/redis"
+	"unalone/backend/services"
+	"unalone/backend/utils"
 )
 
-type locReq struct {
-    Lat float64 `json:"lat"`
-    Lon float64 `json:"lon"`
-}
-
-func UpdateLocationHandler(hub *ws.Hub) fiber.Handler {
-    return func(c *fiber.Ctx) error {
-        var req locReq
-        if err := c.BodyParser(&req); err != nil {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
-        }
-        emailI := c.Locals("email")
-        if emailI == nil {
-            return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthenticated"})
-        }
-        email := emailI.(string)
-        ctx := context.Background()
-        if err := services.UpdateLocationAndMaybeBroadcast(ctx, hub, email, req.Lat, req.Lon); err != nil {
-            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed"})
-        }
-        return c.JSON(fiber.Map{"ok": true})
-    }
+func UpdateLocationHandler(hotspots *services.HotspotService) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req struct {
+			Lat *float64 `json:"lat"`
+			Lon *float64 `json:"lon"`
+		}
+		if c.BodyParser(&req) != nil || req.Lat == nil || req.Lon == nil || !utils.ValidCoordinates(*req.Lat, *req.Lon) {
+			return c.Status(400).JSON(fiber.Map{"error": "Supply valid latitude and longitude"})
+		}
+		ctx, cancel := context.WithTimeout(c.UserContext(), 5*time.Second)
+		defer cancel()
+		err := hotspots.Update(ctx, c.Locals("userId").(string), *req.Lat, *req.Lon)
+		if errors.Is(err, redis.ErrLocationRateLimited) {
+			return c.Status(429).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err != nil {
+			return c.Status(503).JSON(fiber.Map{"error": "Could not share your location"})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	}
 }

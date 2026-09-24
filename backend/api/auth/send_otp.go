@@ -1,32 +1,41 @@
 package auth
 
 import (
-    "context"
-    "strings"
-
-    "github.com/gofiber/fiber/v2"
-    cfgpkg "unalone/backend/config"
-    authsvc "unalone/backend/auth"
+	"context"
+	"errors"
+	"github.com/gofiber/fiber/v2"
+	"time"
+	authsvc "unalone/backend/auth"
+	"unalone/backend/config"
+	"unalone/backend/mailer"
+	"unalone/backend/utils"
 )
 
-type sendOTPReq struct {
-    Email string `json:"email"`
-}
-
-func SendOTPHandler(cfg *cfgpkg.Config) fiber.Handler {
-    return func(c *fiber.Ctx) error {
-        var req sendOTPReq
-        if err := c.BodyParser(&req); err != nil {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
-        }
-        email := strings.TrimSpace(req.Email)
-        if email == "" {
-            return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email required"})
-        }
-        ctx := context.Background()
-        if _, err := authsvc.SendOTP(ctx, email, cfg.OTPMode); err != nil {
-            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to send"})
-        }
-        return c.JSON(fiber.Map{"ok": true})
-    }
+func SendOTPHandler(cfg *config.Config) fiber.Handler {
+	delivery, configErr := mailer.New(cfg.OTPMode, cfg.SMTP)
+	return func(c *fiber.Ctx) error {
+		if configErr != nil {
+			return c.Status(503).JSON(fiber.Map{"error": "Email delivery is not configured"})
+		}
+		var req struct {
+			Email string `json:"email"`
+		}
+		if c.BodyParser(&req) != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid request"})
+		}
+		email, valid := utils.NormalizeEmail(req.Email)
+		if !valid {
+			return c.Status(400).JSON(fiber.Map{"error": "Enter a valid email address"})
+		}
+		ctx, cancel := context.WithTimeout(c.UserContext(), 5*time.Second)
+		defer cancel()
+		_, err := authsvc.SendOTP(ctx, email, delivery)
+		if errors.Is(err, authsvc.ErrRateLimited) {
+			return c.Status(429).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err != nil {
+			return c.Status(503).JSON(fiber.Map{"error": "Could not send a code. Please try again"})
+		}
+		return c.JSON(fiber.Map{"ok": true, "delivery": delivery.Mode()})
+	}
 }

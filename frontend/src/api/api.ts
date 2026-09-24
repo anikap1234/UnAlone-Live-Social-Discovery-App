@@ -1,16 +1,16 @@
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
-
-const api = axios.create({
-  baseURL: API_BASE,
-  headers: { 'Content-Type': 'application/json' }
+export const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+const api = axios.create({ baseURL: API_BASE, withCredentials: true, timeout: 12000 })
+api.interceptors.response.use(response => response, error => {
+  if (error.response?.status === 401 && !error.config?.url?.includes('verify-otp')) {
+    window.dispatchEvent(new Event('session-expired'))
+  }
+  return Promise.reject(error)
 })
-
-api.interceptors.request.use((cfg) => {
-  const token = localStorage.getItem('token')
-  if (token) cfg.headers = { ...(cfg.headers || {}), Authorization: `Bearer ${token}` }
-  return cfg
-})
-
+export function errorMessage(error: unknown): string {
+  return axios.isAxiosError(error)
+    ? error.response?.data?.error || 'Could not reach UnAlone. Please try again.'
+    : 'Something went wrong. Please try again.'
+}
 export default api
